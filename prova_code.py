@@ -436,14 +436,14 @@ try:
     col3.metric("Nucleare Richiesto", f"{miglior_config['Nuc_GW']} GW")
     col4.metric("Batterie Richieste", f"{miglior_config['BESS_GWh']} GWh")
 
-   # Calcolo il consumo di gas in TWh per il mix ottimo
+    # Calcolo il consumo di gas in TWh per il mix ottimo
     fabbisogno_tot_twh = df_completo['Fabbisogno_MW'].sum() / 1e6
-    gas_usato_twh = miglior_config.get('gas_mwh', 0) / 1e6 # Usa get per sicurezza, se non c'è calcola a zero
+    gas_usato_twh = miglior_config.get('gas_mwh', 0) / 1e6 
     
     # Ricalcolo dai risultati fisici se 'gas_mwh' non è salvato in miglior_config
     if gas_usato_twh == 0:
-        # Trova la riga esatta in df_risultati per prendere il gas_mwh
-        riga_ottima = df_plot.loc[df_risultati['Carbon_Intensity'] == miglior_config['Carbon_Intensity']].iloc[0]
+        # Usa df_plot, che è il nome corretto della variabile in questa sezione!
+        riga_ottima = df_plot.loc[df_plot['Carbon_Intensity'] == miglior_config['Carbon_Intensity']].iloc[0]
         gas_usato_twh = riga_ottima.get('gas_mwh', 0) / 1e6
         
     percentuale_gas = (gas_usato_twh / fabbisogno_tot_twh) * 100 if fabbisogno_tot_twh > 0 else 0
@@ -454,6 +454,7 @@ try:
         f"**Spreco Rete:** {miglior_config['Overgen_TWh']:.1f} TWh/anno",
         unsafe_allow_html=True
     )
+
     st.caption(
         f"Curve usate nel calcolo: FV NORD {quota_fotovoltaico_nord_pct:.2f}% / SUD {100 - quota_fotovoltaico_nord_pct:.2f}% | "
         f"Eolico NORD {quota_eolico_nord_pct:.2f}% / SUD {100 - quota_eolico_nord_pct:.2f}%"
