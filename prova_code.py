@@ -436,21 +436,17 @@ try:
     col3.metric("Nucleare Richiesto", f"{miglior_config['Nuc_GW']} GW")
     col4.metric("Batterie Richieste", f"{miglior_config['BESS_GWh']} GWh")
 
-    # Calcolo il consumo di gas in TWh per il mix ottimo
+   # 1. Calcolo la Domanda Totale (Fabbisogno) in TWh
     fabbisogno_tot_twh = df_completo['Fabbisogno_MW'].sum() / 1e6
-    gas_usato_twh = miglior_config.get('gas_mwh', 0) / 1e6 
     
-    # Ricalcolo dai risultati fisici se 'gas_mwh' non è salvato in miglior_config
-    if gas_usato_twh == 0:
-        # Usa df_plot, che è il nome corretto della variabile in questa sezione!
-        riga_ottima = df_plot.loc[df_plot['Carbon_Intensity'] == miglior_config['Carbon_Intensity']].iloc[0]
-        gas_usato_twh = riga_ottima.get('gas_mwh', 0) / 1e6
-        
-    percentuale_gas = (gas_usato_twh / fabbisogno_tot_twh) * 100 if fabbisogno_tot_twh > 0 else 0
+    # 2. Ricavo il gas in TWh usando la percentuale esatta calcolata dal motore
+    percentuale_gas = miglior_config['Gas_%']
+    gas_usato_twh = (percentuale_gas / 100) * fabbisogno_tot_twh
 
     st.markdown(
         f"**Mix Impianti:** {miglior_config['PV_GW']} GW Solare | {miglior_config['Wind_GW']} GW Eolico <br>"
-        f"**Consumo Gas Residuo:** <span style='color:red;'><b>{gas_usato_twh:.1f} TWh/anno</b></span> ({percentuale_gas:.1f}% del fabbisogno) | "
+        f"**Fabbisogno Totale:** {fabbisogno_tot_twh:.1f} TWh/anno | "
+        f"**Consumo Gas Residuo:** <span style='color:red;'><b>{gas_usato_twh:.1f} TWh/anno</b></span> ({percentuale_gas:.1f}%) | "
         f"**Spreco Rete:** {miglior_config['Overgen_TWh']:.1f} TWh/anno",
         unsafe_allow_html=True
     )
