@@ -443,7 +443,7 @@ try:
     # Ricalcolo dai risultati fisici se 'gas_mwh' non è salvato in miglior_config
     if gas_usato_twh == 0:
         # Trova la riga esatta in df_risultati per prendere il gas_mwh
-        riga_ottima = df_risultati.loc[df_risultati['Carbon_Intensity'] == miglior_config['Carbon_Intensity']].iloc[0]
+        riga_ottima = df_plot.loc[df_risultati['Carbon_Intensity'] == miglior_config['Carbon_Intensity']].iloc[0]
         gas_usato_twh = riga_ottima.get('gas_mwh', 0) / 1e6
         
     percentuale_gas = (gas_usato_twh / fabbisogno_tot_twh) * 100 if fabbisogno_tot_twh > 0 else 0
