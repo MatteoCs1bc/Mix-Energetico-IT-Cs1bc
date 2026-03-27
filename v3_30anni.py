@@ -219,6 +219,77 @@ def simula_scenario_30_anni(prod_pv, prod_wind, fabbisogno,
             pv_gw * 1000.0, wind_gw * 1000.0, nuc_gw * 1000.0, bess_gwh * 1000.0, 
             bess_mw, 50000.0, 2500.0, 12000.0, 5000000.0, 2850.0
         )
+
+        @njit
+def simula_rete_dettaglio_orario(produzione_pv, produzione_wind, fabbisogno,
+                                 pv_mw, wind_mw, nucleare_mw, bess_mwh, bess_mw, gas_mw,
+                                 hydro_fluente_mw, hydro_bacino_mw, hydro_bacino_max_mwh, hydro_inflow_mw,
+                                 efficienza_bess=0.9):
+    ore = len(fabbisogno)
+    soc_corrente = bess_mwh * 0.5
+    soc_hydro = hydro_bacino_max_mwh * 0.5
+    
+    prod_pv_array = produzione_pv * pv_mw
+    prod_wind_array = produzione_wind * wind_mw
+    potenza_nucleare_costante = nucleare_mw
+    sqrt_eff = np.sqrt(efficienza_bess)
+
+    # Array di output per le 8760 ore
+    out_pv = np.zeros(ore)
+    out_wind = np.zeros(ore)
+    out_nuc = np.full(ore, potenza_nucleare_costante)
+    out_hydro_fluente = np.full(ore, hydro_fluente_mw)
+    out_hydro_bacino = np.zeros(ore)
+    out_bess_scarica = np.zeros(ore)
+    out_gas = np.zeros(ore)
+    out_deficit = np.zeros(ore)
+
+    for t in range(ore):
+        soc_hydro += hydro_inflow_mw
+        if soc_hydro > hydro_bacino_max_mwh: soc_hydro = hydro_bacino_max_mwh
+
+        out_pv[t] = prod_pv_array[t]
+        out_wind[t] = prod_wind_array[t]
+
+        generazione_base = prod_pv_array[t] + prod_wind_array[t] + hydro_fluente_mw + potenza_nucleare_costante
+        bilancio_netto = generazione_base - fabbisogno[t]
+
+        if bilancio_netto > 0:
+            spazio_libero_batteria = bess_mwh - soc_corrente
+            potenza_carica = min(bilancio_netto, bess_mw, spazio_libero_batteria / sqrt_eff)
+            soc_corrente += potenza_carica * sqrt_eff
+        else:
+            energia_richiesta = abs(bilancio_netto)
+            potenza_scarica_bess = min(energia_richiesta, bess_mw)
+            energia_out_bess = potenza_scarica_bess / sqrt_eff
+            
+            if soc_corrente >= energia_out_bess:
+                soc_corrente -= energia_out_bess
+                energia_richiesta -= potenza_scarica_bess
+                out_bess_scarica[t] = potenza_scarica_bess
+            else:
+                energia_disp_bess = soc_corrente * sqrt_eff
+                soc_corrente = 0.0
+                energia_richiesta -= energia_disp_bess
+                out_bess_scarica[t] = energia_disp_bess
+
+            if energia_richiesta > 0:
+                potenza_scarica_hydro = min(energia_richiesta, hydro_bacino_mw)
+                if soc_hydro >= potenza_scarica_hydro:
+                    soc_hydro -= potenza_scarica_hydro
+                    energia_richiesta -= potenza_scarica_hydro
+                    out_hydro_bacino[t] = potenza_scarica_hydro
+                else:
+                    out_hydro_bacino[t] = soc_hydro
+                    energia_richiesta -= soc_hydro
+                    soc_hydro = 0.0
+
+            if energia_richiesta > 0:
+                uso_gas = min(energia_richiesta, gas_mw)
+                out_gas[t] = uso_gas
+                out_deficit[t] = energia_richiesta - uso_gas
+
+    return out_pv, out_wind, out_nuc, out_hydro_fluente, out_hydro_bacino, out_bess_scarica, out_gas, out_deficit
         
         gas_tot += gas
         def_tot += dfc
@@ -542,6 +613,78 @@ try:
     max_gas = max(1.0, df_t['Gas_TWh'].max() * 1.2)
     fig2.update_yaxes(title_text="Gas Bruciato (TWh)", secondary_y=True, range=[0, max_gas])
     st.plotly_chart(fig2, use_container_width=True)
+
+# ==========================================
+    # GRAFICO ORARIO DELL'ULTIMO ANNO (ZOOMABILE)
+    # ==========================================
+    st.markdown("---")
+    st.subheader(f"🔍 Dispacciamento Orario (Anno {anni_transizione})")
+    st.markdown("Esplora il mix energetico dell'ultimo anno. **Evidenzia col mouse un'area sul grafico per fare zoom** su specifiche settimane o giorni. Usa il doppio clic per tornare alla vista completa.")
+
+    with st.spinner("Calcolo del dispacciamento orario dettagliato..."):
+        # Recupero i GW/GWh installati nell'ultimo anno
+        pv_gw_fin = get_reached_capacity(anni_transizione, t_start['pv'], pv_sq, miglior_config['Target_PV'], rate['pv'])
+        wind_gw_fin = get_reached_capacity(anni_transizione, t_start['wind'], wind_sq, miglior_config['Target_Wind'], rate['wind'])
+        nuc_gw_fin = get_reached_capacity(anni_transizione, t_start['nuc'], nuc_sq, miglior_config['Target_Nuc'], rate['nuc'], True)
+        bess_gwh_fin = get_reached_capacity(anni_transizione, t_start['bess'], bess_sq, miglior_config['Target_BESS'], rate['bess'])
+        bess_mw_fin = bess_gwh_fin * 1000.0 * 0.5
+
+        # Simulo le 8760 ore con la nuova funzione
+        (h_pv, h_wind, h_nuc, h_hyd_fl, h_hyd_bac, h_bess, h_gas, h_def) = simula_rete_dettaglio_orario(
+            array_pv, array_wind, array_fabbisogno, 
+            pv_gw_fin*1000, wind_gw_fin*1000, nuc_gw_fin*1000, bess_gwh_fin*1000, bess_mw_fin,
+            50000.0, 2500.0, 12000.0, 5000000.0, 2850.0
+        )
+
+        # Costruisco il DataFrame per il plot
+        df_orario = pd.DataFrame({
+            'Nucleare': h_nuc,
+            'Idroelettrico Fluente': h_hyd_fl,
+            'Eolico': h_wind,
+            'Fotovoltaico': h_pv,
+            'Idroelettrico Bacino': h_hyd_bac,
+            'Batterie (Scarica)': h_bess,
+            'Gas': h_gas,
+            'Deficit (Blackout)': h_def,
+            'Fabbisogno': array_fabbisogno
+        }, index=df_completo.index) # Uso l'indice temporale originale del GME
+
+        # Creo la figura Plotly
+        fig3 = go.Figure()
+
+        # Colori personalizzati per una lettura intuitiva
+        colori = {
+            'Nucleare': '#9b59b6', 'Idroelettrico Fluente': '#3498db',
+            'Eolico': '#2ecc71', 'Fotovoltaico': '#f1c40f',
+            'Idroelettrico Bacino': '#2980b9', 'Batterie (Scarica)': '#e67e22',
+            'Gas': '#e74c3c', 'Deficit (Blackout)': '#000000'
+        }
+
+        # Aggiungo le aree impilate (stackgroup)
+        for col in colori.keys():
+            fig3.add_trace(go.Scatter(
+                x=df_orario.index, y=df_orario[col],
+                mode='lines', stackgroup='one', name=col, line=dict(width=0.5, color=colori[col])
+            ))
+
+        # Aggiungo la linea del Fabbisogno (non impilata, in sovraimpressione)
+        fig3.add_trace(go.Scatter(
+            x=df_orario.index, y=df_orario['Fabbisogno'],
+            mode='lines', name='Fabbisogno', line=dict(color='black', width=2, dash='dot')
+        ))
+
+        # Configuro il layout con Range Slider per navigare comodamente
+        fig3.update_layout(
+            height=600,
+            hovermode="x unified",
+            yaxis_title="Potenza (MW)",
+            legend_title="Fonti",
+            xaxis=dict(
+                rangeslider=dict(visible=True, thickness=0.05), # Aggiunge la barra di scorrimento sotto!
+                type="date"
+            )
+        )
+        st.plotly_chart(fig3, use_container_width=True)
 
 except Exception as e:
     st.error(f"⚠️ Errore: {e}")
