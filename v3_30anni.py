@@ -12,12 +12,44 @@ from numba import njit
 # ==========================================
 st.set_page_config(page_title="Simulatore Mix Energetico PRO", layout="wide")
 
-# ... [MANTIENI TUTTI I DIZIONARI DEI PESI GEOGRAFICI E LE FUNZIONI DI SUPPORTO DATI ESATTAMENTE COME PRIMA] ...
-# (Ometto la parte di caricamento dati per brevità, non è cambiata)
+# ==========================================
+# PESI GEOGRAFICI CURVE MEDIE
+# ==========================================
+PV_WEIGHTS_NORD = {
+    'Lombardia orientale, area Brescia_NORD': 0.2956,
+    'Veneto centrale, area Padova_NORD': 0.2313,
+    'Emilia-Romagna orientale, area Ferrara,pianura_NORD': 0.2213,
+    'Piemonte meridionale, area Cuneo_NORD': 0.1874,
+    'Friuli-Venezia Giulia, area Udine_NORD': 0.0644,
+}
+PV_WEIGHTS_SUD = {
+    'Puglia, area Lecce_SUD': 0.3241,
+    'Sicilia interna, area Caltanissetta,Enna_SUD': 0.2117,
+    'Lazio meridionale, area Latina_SUD': 0.1982,
+    'Sardegna, area Oristano,Campidano_SUD': 0.1330,
+    'Campania interna, area Benevento_SUD': 0.1330,
+}
+WIND_WEIGHTS_NORD = {
+    'Crinale savonese entroterra ligure_NORD': 0.6020,
+    'Appennino emiliano, area Monte Cimone_NORD': 0.2239,
+    'Piemonte sud-occidentale , Cuneese_NORD': 0.0945,
+    'Veneto orientale , Delta del Po_NORD': 0.0647,
+    'Valle d’Aosta , area alpina_NORD': 0.0149,
+}
+WIND_WEIGHTS_SUD = {
+    'Puglia, area Foggia,Daunia_SUD': 0.3093,
+    'Sicilia occidentale, area Trapani_SUD': 0.2267,
+    'Campania, area Benevento,Avellino_SUD': 0.1950,
+    'Basilicata, area Melfi,Potenza_SUD': 0.1489,
+    'Calabria, area Crotone,Catanzaro_SUD': 0.1201,
+}
 
 DEFAULT_PV_NORD_SHARE = 0.4800
 DEFAULT_WIND_NORD_SHARE = 0.0163
 
+# ==========================================
+# FUNZIONI DI SUPPORTO DATI
+# ==========================================
 def _serie_pesata(df, pesi_colonne, scala=1.0, clip_upper=1.0):
     colonne_mancanti = [col for col in pesi_colonne if col not in df.columns]
     if colonne_mancanti: raise KeyError("Mancano colonne: " + ", ".join(colonne_mancanti))
@@ -139,7 +171,7 @@ def simula_rete_light_fast(produzione_pv, produzione_wind, fabbisogno,
 
 @njit
 def calcola_capacita_anno_rate(anno, start_yr, val_start, val_target, rate, step_wise=False):
-    # FIX: Gestione corretta della decrescita (smantellamento)
+    # Gestione corretta della decrescita (smantellamento)
     if anno <= start_yr: 
         return val_start
     anni_attivi = anno - start_yr
@@ -197,11 +229,84 @@ def simula_scenario_30_anni(prod_pv, prod_wind, fabbisogno,
     return (gas_tot, def_tot, over_tot, hydro_disp_tot, bess_out_tot, 
             pv_gen_tot, wind_gen_tot, nuc_gen_tot, bess_installed_tot_mwh_years, vre_gen_tot)
 
+
+@njit
+def simula_rete_dettaglio_orario(produzione_pv, produzione_wind, fabbisogno,
+                                 pv_mw, wind_mw, nucleare_mw, bess_mwh, bess_mw, gas_mw,
+                                 hydro_fluente_mw, hydro_bacino_mw, hydro_bacino_max_mwh, hydro_inflow_mw,
+                                 efficienza_bess=0.9):
+    ore = len(fabbisogno)
+    soc_corrente = bess_mwh * 0.5
+    soc_hydro = hydro_bacino_max_mwh * 0.5
+    
+    prod_pv_array = produzione_pv * pv_mw
+    prod_wind_array = produzione_wind * wind_mw
+    potenza_nucleare_costante = nucleare_mw
+    sqrt_eff = np.sqrt(efficienza_bess)
+
+    # Array di output per le 8760 ore
+    out_pv = np.zeros(ore)
+    out_wind = np.zeros(ore)
+    out_nuc = np.full(ore, potenza_nucleare_costante)
+    out_hydro_fluente = np.full(ore, hydro_fluente_mw)
+    out_hydro_bacino = np.zeros(ore)
+    out_bess_scarica = np.zeros(ore)
+    out_gas = np.zeros(ore)
+    out_deficit = np.zeros(ore)
+
+    for t in range(ore):
+        soc_hydro += hydro_inflow_mw
+        if soc_hydro > hydro_bacino_max_mwh: soc_hydro = hydro_bacino_max_mwh
+
+        out_pv[t] = prod_pv_array[t]
+        out_wind[t] = prod_wind_array[t]
+
+        generazione_base = prod_pv_array[t] + prod_wind_array[t] + hydro_fluente_mw + potenza_nucleare_costante
+        bilancio_netto = generazione_base - fabbisogno[t]
+
+        if bilancio_netto > 0:
+            spazio_libero_batteria = bess_mwh - soc_corrente
+            potenza_carica = min(bilancio_netto, bess_mw, spazio_libero_batteria / sqrt_eff)
+            soc_corrente += potenza_carica * sqrt_eff
+        else:
+            energia_richiesta = abs(bilancio_netto)
+            potenza_scarica_bess = min(energia_richiesta, bess_mw)
+            energia_out_bess = potenza_scarica_bess / sqrt_eff
+            
+            if soc_corrente >= energia_out_bess:
+                soc_corrente -= energia_out_bess
+                energia_richiesta -= potenza_scarica_bess
+                out_bess_scarica[t] = potenza_scarica_bess
+            else:
+                energia_disp_bess = soc_corrente * sqrt_eff
+                soc_corrente = 0.0
+                energia_richiesta -= energia_disp_bess
+                out_bess_scarica[t] = energia_disp_bess
+
+            if energia_richiesta > 0:
+                potenza_scarica_hydro = min(energia_richiesta, hydro_bacino_mw)
+                if soc_hydro >= potenza_scarica_hydro:
+                    soc_hydro -= potenza_scarica_hydro
+                    energia_richiesta -= potenza_scarica_hydro
+                    out_hydro_bacino[t] = potenza_scarica_hydro
+                else:
+                    out_hydro_bacino[t] = soc_hydro
+                    energia_richiesta -= soc_hydro
+                    soc_hydro = 0.0
+
+            if energia_richiesta > 0:
+                uso_gas = min(energia_richiesta, gas_mw)
+                out_gas[t] = uso_gas
+                out_deficit[t] = energia_richiesta - uso_gas
+
+    return out_pv, out_wind, out_nuc, out_hydro_fluente, out_hydro_bacino, out_bess_scarica, out_gas, out_deficit
+
+
 # ==========================================
 # 3. HELPER PYTHON E MOTORE SCENARI
 # ==========================================
 def get_reached_capacity(anno_fine, start_yr, val_start, val_target, rate, step_wise=False):
-    # FIX: Sincronizzato con la versione Numba per la decrescita
+    # Sincronizzato con la versione Numba per la decrescita
     if anno_fine <= start_yr: return val_start
     anni_attivi = anno_fine - start_yr
     if val_target < val_start:
@@ -227,19 +332,19 @@ def simula_motore_30_anni(array_pv, array_wind, array_fabbisogno, t_start_py, ra
     def get_valid_targets(sq, max_reach_val, base_targets):
         valid = [float(sq)]
         for t in base_targets:
-            if t <= max_reach_val: # FIX: Ora include anche valori < Status Quo (es. 0)
+            if t <= max_reach_val: # Include anche valori < Status Quo (es. 0)
                 valid.append(float(t))
         if max_reach_val > sq:
             valid.append(float(max_reach_val))
         return sorted(list(set([round(v, 1) for v in valid])))
 
-    # Calcolo dei massimi teorici raggiungibili (solo in crescita) per limitare le iterazioni inutili
+    # Calcolo dei massimi teorici raggiungibili
     max_pv = pv_sq + (max(0, anni_transizione - t_start_py['pv']) * rate_py['pv'])
     max_wind = wind_sq + (max(0, anni_transizione - t_start_py['wind']) * rate_py['wind'])
     max_bess = bess_sq + (max(0, anni_transizione - t_start_py['bess']) * rate_py['bess'])
     max_nuc = np.floor(nuc_sq + (max(0, anni_transizione - t_start_py['nuc']) * rate_py['nuc']))
 
-    # FIX: Aggiunto lo 0 tra i target per simulare l'abbandono di una tecnologia se troppo costosa
+    # Aggiunto lo 0 tra i target per simulare l'abbandono di una tecnologia
     scenari_pv_gw = get_valid_targets(pv_sq, max_pv, [0, 70, 100, 150])
     scenari_wind_gw = get_valid_targets(wind_sq, max_wind, [0, 30, 60, 90, 120])
     scenari_bess_gwh = get_valid_targets(bess_sq, max_bess, [0, 50, 100, 150, 300])
@@ -303,7 +408,7 @@ def applica_economia_cumulata(risultati_30y, fabbisogno_annuo_mwh, mercato, anni
         costo_base_integr = mercato['costo_base_integrazione'] * (quota_vre_media ** 2)
         costo_sistema_totale = r['vre_gen_tot'] * costo_base_integr
         
-        # FIX: Eliminato ogni riferimento al "Risparmio". Calcoliamo solo la Spesa Totale netta.
+        # Spesa Totale netta, senza riferimento a Caso 0
         costo_totale_30y = (costo_pv_tot + costo_wind_tot + costo_nuc_tot + costo_hydro_tot + 
                             costo_gas_tot + costo_bess_tot + costo_blackout_tot + costo_sistema_totale)
         
@@ -329,7 +434,7 @@ def applica_economia_cumulata(risultati_30y, fabbisogno_annuo_mwh, mercato, anni
 
     df_risultati = pd.DataFrame(storia)
 
-    # Pulizia dai duplicati fisici (scenari che pur avendo target diversi portano alle stesse installazioni reali)
+    # Pulizia dai duplicati fisici 
     df_risultati['Sogni_Infranti'] = (
         abs(df_risultati['Target_PV'] - df_risultati['Reached_PV']) +
         abs(df_risultati['Target_Wind'] - df_risultati['Reached_Wind']) +
@@ -421,6 +526,7 @@ try:
         f"{miglior_config['Reached_Nuc']} GW Nucleare"
     )
 
+    # --- GRAFICO 1: FRONTIERA DI PARETO ---
     st.subheader("📊 Frontiera di Pareto")
     fig = px.scatter(
         df_plot, x='Carbon_Intensity_30y', y='Spesa_Totale_Mld_30y', color='Reached_Nuc',
@@ -439,7 +545,100 @@ try:
     fig.update_layout(xaxis_autorange="reversed", height=500)
     st.plotly_chart(fig, use_container_width=True)
 
-    # ... (Il resto dei grafici per traiettoria temporale e dispacciamento orario rimane identico) ...
+    # --- GRAFICO 2: TRAIETTORIA DELL'OTTIMO ---
+    st.markdown("---")
+    st.subheader("🛤️ Traiettoria dell'Ottimo e Consumo di Gas")
+    
+    storia_t = []
+    pv_sq, wind_sq, nuc_sq, bess_sq = 40.0, 10.0, 0.0, 10.0
+
+    for anno in range(anni_transizione + 1):
+        pv_gw = get_reached_capacity(anno, t_start['pv'], pv_sq, miglior_config['Target_PV'], rate['pv'])
+        wind_gw = get_reached_capacity(anno, t_start['wind'], wind_sq, miglior_config['Target_Wind'], rate['wind'])
+        nuc_gw = get_reached_capacity(anno, t_start['nuc'], nuc_sq, miglior_config['Target_Nuc'], rate['nuc'], True)
+        bess_gwh = get_reached_capacity(anno, t_start['bess'], bess_sq, miglior_config['Target_BESS'], rate['bess'])
+        
+        bess_mw = bess_gwh * 1000.0 * 0.5
+        
+        gas, _, _, _, _ = simula_rete_light_fast(
+            array_pv, array_wind, array_fabbisogno, pv_gw*1000, wind_gw*1000, nuc_gw*1000, bess_gwh*1000,
+            bess_mw, 50000, 2500, 12000, 5000000, 2850
+        )
+        storia_t.append({'Anno': anno, 'PV_GW': pv_gw, 'Wind_GW': wind_gw, 'Nuc_GW': nuc_gw, 'Gas_TWh': gas/1e6})
+
+    df_t = pd.DataFrame(storia_t)
+    fig2 = make_subplots(specs=[[{"secondary_y": True}]])
+    fig2.add_trace(go.Scatter(x=df_t['Anno'], y=df_t['PV_GW'], mode='lines', stackgroup='one', name='PV Raggiunto (GW)', fillcolor='gold'), secondary_y=False)
+    fig2.add_trace(go.Scatter(x=df_t['Anno'], y=df_t['Wind_GW'], mode='lines', stackgroup='one', name='Wind Raggiunto (GW)', fillcolor='lightskyblue'), secondary_y=False)
+    fig2.add_trace(go.Scatter(x=df_t['Anno'], y=df_t['Nuc_GW'], mode='lines', stackgroup='one', name='Nuc Raggiunto (GW)', fillcolor='mediumpurple'), secondary_y=False)
+    fig2.add_trace(go.Scatter(x=df_t['Anno'], y=df_t['Gas_TWh'], mode='lines+markers', name='Gas (TWh/anno)', line=dict(color='red', width=3)), secondary_y=True)
+    
+    fig2.update_layout(hovermode="x unified", height=450)
+    fig2.update_yaxes(title_text="Capacità Installata (GW)", secondary_y=False)
+    max_gas = max(1.0, df_t['Gas_TWh'].max() * 1.2)
+    fig2.update_yaxes(title_text="Gas Bruciato (TWh)", secondary_y=True, range=[0, max_gas])
+    st.plotly_chart(fig2, use_container_width=True)
+
+    # --- GRAFICO 3: DISPACCIAMENTO ORARIO ---
+    st.markdown("---")
+    st.subheader(f"🔍 Dispacciamento Orario (Anno {anni_transizione})")
+    st.markdown("Esplora il mix energetico dell'ultimo anno. **Evidenzia col mouse un'area sul grafico per fare zoom** su specifiche settimane o giorni. Usa il doppio clic per tornare alla vista completa.")
+
+    with st.spinner("Calcolo del dispacciamento orario dettagliato..."):
+        pv_gw_fin = get_reached_capacity(anni_transizione, t_start['pv'], pv_sq, miglior_config['Target_PV'], rate['pv'])
+        wind_gw_fin = get_reached_capacity(anni_transizione, t_start['wind'], wind_sq, miglior_config['Target_Wind'], rate['wind'])
+        nuc_gw_fin = get_reached_capacity(anni_transizione, t_start['nuc'], nuc_sq, miglior_config['Target_Nuc'], rate['nuc'], True)
+        bess_gwh_fin = get_reached_capacity(anni_transizione, t_start['bess'], bess_sq, miglior_config['Target_BESS'], rate['bess'])
+        bess_mw_fin = bess_gwh_fin * 1000.0 * 0.5
+
+        (h_pv, h_wind, h_nuc, h_hyd_fl, h_hyd_bac, h_bess, h_gas, h_def) = simula_rete_dettaglio_orario(
+            array_pv, array_wind, array_fabbisogno, 
+            pv_gw_fin*1000, wind_gw_fin*1000, nuc_gw_fin*1000, bess_gwh_fin*1000, bess_mw_fin,
+            50000.0, 2500.0, 12000.0, 5000000.0, 2850.0
+        )
+
+        df_orario = pd.DataFrame({
+            'Nucleare': h_nuc,
+            'Idroelettrico Fluente': h_hyd_fl,
+            'Eolico': h_wind,
+            'Fotovoltaico': h_pv,
+            'Idroelettrico Bacino': h_hyd_bac,
+            'Batterie (Scarica)': h_bess,
+            'Gas': h_gas,
+            'Deficit (Blackout)': h_def,
+            'Fabbisogno': array_fabbisogno
+        }, index=df_completo.index) 
+
+        fig3 = go.Figure()
+        colori = {
+            'Nucleare': '#9b59b6', 'Idroelettrico Fluente': '#3498db',
+            'Eolico': '#2ecc71', 'Fotovoltaico': '#f1c40f',
+            'Idroelettrico Bacino': '#2980b9', 'Batterie (Scarica)': '#e67e22',
+            'Gas': '#e74c3c', 'Deficit (Blackout)': '#000000'
+        }
+
+        for col in colori.keys():
+            fig3.add_trace(go.Scatter(
+                x=df_orario.index, y=df_orario[col],
+                mode='lines', stackgroup='one', name=col, line=dict(width=0.5, color=colori[col])
+            ))
+
+        fig3.add_trace(go.Scatter(
+            x=df_orario.index, y=df_orario['Fabbisogno'],
+            mode='lines', name='Fabbisogno', line=dict(color='black', width=2, dash='dot')
+        ))
+
+        fig3.update_layout(
+            height=600,
+            hovermode="x unified",
+            yaxis_title="Potenza (MW)",
+            legend_title="Fonti",
+            xaxis=dict(
+                rangeslider=dict(visible=True, thickness=0.05), 
+                type="date"
+            )
+        )
+        st.plotly_chart(fig3, use_container_width=True)
 
 except Exception as e:
     st.error(f"⚠️ Errore: {e}")
